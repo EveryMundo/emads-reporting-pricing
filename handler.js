@@ -7,13 +7,10 @@ const s3Operations = require('./lib/s3Operations')
 const req = require('./lib/external/request')
 const fHandler = require('./lib/fileHandler')
 
-const fs = require('fs');
-const { env } = require('process')
-
 const handler = async (event, context) => {
   try {
-    // let tenants = await mongoHelper.getAllSearchEngineDbs()
-    let tenants = ["a3"]
+    let tenants = await mongoHelper.getAllSearchEngineDbs()
+    // let tenants = ["a3"]
     for (const tenant of tenants) {
       let stringReport = ""
       stringReport += `Routes report without prices ${new Date().toLocaleDateString()}\n`
