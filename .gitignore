@@ -65,3 +65,4 @@ archives/*
 .vscode/*
 .file:/*
 testUploads/*
+reports/*
