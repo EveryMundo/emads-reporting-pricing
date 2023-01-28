@@ -7,7 +7,31 @@ const s3Operations = require('./lib/s3Operations')
 const req = require('./lib/external/request')
 const fHandler = require('./lib/fileHandler')
 
-const getAggregation = (tenant) => {
+const getAdgAggregation = (tenant, query) => {
+  return searchEngineOps.aggregateAdGroupsV1(tenant, [{
+    $match: query
+  },
+  {
+    $group: {
+      _id: {
+        "accountId": "$_id.accountId",
+        "campaignId": "$_id.campaignId",
+      },
+      campaigns: {
+        $addToSet: {
+          "accountId": "$_id.accountId",
+          "campaignId": "$_id.campaignId",
+          "campaignName": "$campaignName",
+        }
+      },
+      total: { $sum: 1 }
+    }
+  },
+  {
+    $sort: { total: -1 }
+  }])
+}
+const getDocsAggregation = (tenant) => {
   return searchEngineOps.aggregateFareWireCustomizerItemsV2(tenant, [
     {
       $match: {
@@ -50,7 +74,7 @@ const handler = async (event, context) => {
         const { journeyType, lookaheadWindow } = await req.getSettings(tenant)
         console.log({ journeyType, lookaheadWindow })
 
-        const routes = await getAggregation(tenant)
+        const routes = await getDocsAggregation(tenant)
         stringReport += `\n${tenant},${routes.length}\n`
         console.log(`${tenant},${routes.length}`)
         await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, stringReport)
@@ -81,7 +105,7 @@ const handler = async (event, context) => {
               }
 
               if (!curcAvailable && availableCurrencies.length) {
-                routesToQueryAdgroups.push({ "routeIdentifier.o": route._id.origin, "routeIdentifier.d": destInfo.destination, "routeIdentifier.curC": destInfo.currency })
+                routesToQueryAdgroups.push({ query: { "routeIdentifier.o": route._id.origin, "routeIdentifier.d": destInfo.destination, "routeIdentifier.curC": destInfo.currency, mapped: true }, availableCurrencies })
               }
             }
           }) // flatted empty routes
@@ -90,11 +114,20 @@ const handler = async (event, context) => {
         }
         // for naming convention - report campaigns only
         if (routesToQueryAdgroups.length) {
-          const adGroupsChunk = inChunks(routesToQueryAdgroups, 5);
-          const dbQueries = adGroupsChunk.map((adgroups) => {
-            return adgroups.map(query => searchEngineOps.getAdGroupsV1(tenant, query))
-          })
-          console.log({ dbQueries })
+          await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name, Currency Used, Available Currency")
+          const routesChunk = inChunks(routesToQueryAdgroups, 5);
+          // const dbQueries = routesChunk.map((adgroups) => {
+          for (const routesArray of routesChunk) {
+            let fileBuffer3 = ""
+            const fullfiledCampaigns = await Promise.all(routesArray.map(data => getAdgAggregation(tenant, data.query)))
+            // console.log({ fullfiledCampaigns })
+            routesArray.forEach((route, index) => {
+              fileBuffer3 += fullfiledCampaigns[index].flatMap(x => x.campaigns).map((dest) => {
+                return `\n${dest.accountId},${dest.campaignId},${dest.campaignName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
+              }).join("\n")
+            })
+            await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, fileBuffer3)
+          }
         }
       } catch (error) {
         console.log(error);
