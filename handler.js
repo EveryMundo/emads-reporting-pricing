@@ -34,7 +34,7 @@ const getAdgAggregation = (tenant, namingConvention, query) => {
   if (!namingConvention) {
     pipeline[1]['$group']["_id"]["adgroupId"] = "$_id.adgroupId"
     pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupId"] = "$_id.adgroupId"
-    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupName"] = "$_id.name"
+    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupName"] = "$name"
 
   }
   return searchEngineOps.aggregateAdGroupsV1(tenant, pipeline)
@@ -126,7 +126,7 @@ const handler = async (event, context) => {
           if (namingConvention) {
             await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name, Currency Used, Available Currency")
           } else {
-            await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name,Adgroup ID, AdGroup Name Currency Used, Available Currency")
+            await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name,Adgroup ID, AdGroup Name, Currency Used, Available Currency")
           }
           const routesChunk = inChunks(routesToQueryAdgroups, 5);
           // const dbQueries = routesChunk.map((adgroups) => {
