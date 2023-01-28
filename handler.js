@@ -7,8 +7,8 @@ const s3Operations = require('./lib/s3Operations')
 const req = require('./lib/external/request')
 const fHandler = require('./lib/fileHandler')
 
-const getAdgAggregation = (tenant, query) => {
-  return searchEngineOps.aggregateAdGroupsV1(tenant, [{
+const getAdgAggregation = (tenant, namingConvention, query) => {
+  let pipeline = [{
     $match: query
   },
   {
@@ -29,7 +29,15 @@ const getAdgAggregation = (tenant, query) => {
   },
   {
     $sort: { total: -1 }
-  }])
+  }]
+
+  if (!namingConvention) {
+    pipeline[1]['$group']["_id"]["adgroupId"] = "$_id.adgroupId"
+    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupId"] = "$_id.adgroupId"
+    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupName"] = "$_id.name"
+
+  }
+  return searchEngineOps.aggregateAdGroupsV1(tenant, pipeline)
 }
 const getDocsAggregation = (tenant) => {
   return searchEngineOps.aggregateFareWireCustomizerItemsV2(tenant, [
@@ -63,7 +71,7 @@ const getDocsAggregation = (tenant) => {
 const handler = async (event, context) => {
   try {
     // let tenants = await mongoHelper.getAllSearchEngineDbs()
-    let tenants = ["a3"]
+    let tenants = ["jl"]
     const reportForClient = `client-report_${new Date().toLocaleDateString().replace(/\//g, "_")}.csv`
     const reportForDev = `dev-report_${new Date().toLocaleDateString().replace(/\//g, "_")}.csv`
     for (const tenant of tenants) {
@@ -71,7 +79,7 @@ const handler = async (event, context) => {
       let stringReport = `Routes report without prices ${new Date().toLocaleDateString()}`
       stringReport += "\ntenant, Total routes without prices"
       try {
-        const { journeyType, lookaheadWindow } = await req.getSettings(tenant)
+        const { journeyType, lookaheadWindow, namingConvention } = await req.getSettings(tenant)
         console.log({ journeyType, lookaheadWindow })
 
         const routes = await getDocsAggregation(tenant)
@@ -114,16 +122,23 @@ const handler = async (event, context) => {
         }
         // for naming convention - report campaigns only
         if (routesToQueryAdgroups.length) {
-          await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name, Currency Used, Available Currency")
+          console.log(`${routesToQueryAdgroups.length} queries`)
+          if (namingConvention) {
+            await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name, Currency Used, Available Currency")
+          } else {
+            await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name,Adgroup ID, AdGroup Name Currency Used, Available Currency")
+          }
           const routesChunk = inChunks(routesToQueryAdgroups, 5);
           // const dbQueries = routesChunk.map((adgroups) => {
           for (const routesArray of routesChunk) {
             let fileBuffer3 = ""
-            const fullfiledCampaigns = await Promise.all(routesArray.map(data => getAdgAggregation(tenant, data.query)))
+            const fullfiledCampaigns = await Promise.all(routesArray.map(data => getAdgAggregation(tenant, namingConvention, data.query)))
             // console.log({ fullfiledCampaigns })
             routesArray.forEach((route, index) => {
               fileBuffer3 += fullfiledCampaigns[index].flatMap(x => x.campaigns).map((dest) => {
-                return `\n${dest.accountId},${dest.campaignId},${dest.campaignName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
+                return namingConvention ?
+                  `\n${dest.accountId},${dest.campaignId},${dest.campaignName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
+                  : `\n${dest.accountId},${dest.campaignId},${dest.campaignName}, ${dest.adgroupId}, ${dest.adgroupName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
               }).join("\n")
             })
             await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, fileBuffer3)
