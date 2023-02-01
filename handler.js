@@ -84,7 +84,17 @@ const handler = async (event, context) => {
       stringReport += "\ntenant, Total origins without prices"
       try {
         const { journeyType, lookaheadWindow, namingConvention } = await req.getSettings(tenant)
-        console.log({ journeyType, lookaheadWindow })
+        const organizationSettings = await req.getOrganizationSettings(tenant)
+        const siteEditions = organizationSettings.siteEditionConfigurations.map(({ siteEdition, currencyConfigurations }) => {
+          return {
+            n: siteEdition.name,
+            l: siteEdition.language,
+            c: siteEdition.country,
+            g: siteEdition.global,
+            config: currencyConfigurations,
+            gPrefix: (siteEdition.country !== null ? `GS:${siteEdition.language.toLowerCase()}-${siteEdition.country.toUpperCase()}` : `GS:${siteEdition.language.toLowerCase()}`)
+          }
+        })
 
         const routes = await getDocsAggregation(tenant)
         const aggregatedByOrigin = {}
@@ -102,14 +112,14 @@ const handler = async (event, context) => {
         await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, stringReport)
         stringReport = `\nOrigin, Destination, Currency, Available currencies, Report Notes, Recommendation`
         await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, stringReport)
-        stringReport = namingConvention ? `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName` : `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, adgroupId, adgroupName`
+        stringReport = namingConvention ? `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, TRFX site edition (Default config)` : `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, adgroupId, adgroupName`
         await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, stringReport)
         // console.log(`${routes.length} routes`)
         const routesToQueryAdgroups = []
         for (const origin of Object.keys(aggregatedByOrigin)) {
           console.log(`Origin:${origin} with ${aggregatedByOrigin[origin].destinations.length} destinations`)
           const destinationsInChunks = inChunks(aggregatedByOrigin[origin].destinations, 20);
-          const pricesResultArray = await Promise.all(destinationsInChunks.map(chunks => req.getPrices(tenant, journeyType, lookaheadWindow, origin, chunks.map(dest => dest.destination))))
+          const pricesResultArray = await Promise.all(destinationsInChunks.map(chunks => req.getPrices(tenant, organizationSettings.journeyType, lookaheadWindow, organizationSettings.dataExpirationWindow, origin, chunks.map(dest => dest.destination))))
           const priceResultFlatted = pricesResultArray.flatMap(priceArr => priceArr)
           let fileBuffer1 = ""
           let fileBuffer2 = ""
@@ -129,7 +139,7 @@ const handler = async (event, context) => {
                   fileBuffer2 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${notes}`
                 } else {
                   fileBuffer1 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${notes}`
-                  fileBuffer3 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${Object.values(o_d.targeting).join(",")}`
+                  fileBuffer3 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${Object.values(o_d.targeting).join(",")},${namingConvention ? matchingSE(o_d.targeting.campaignName, siteEditions).join(" ") : ""}`
                 }
               })
             }
@@ -139,62 +149,6 @@ const handler = async (event, context) => {
           await fHandler.appendToFile(`./reports/${tenant}-${reportForDev}`, fileBuffer2)
           await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, fileBuffer3)
         }
-
-        // for (const route of routes) {
-        //   console.log(`Origin:${route._id.origin} with ${route.destinations.length} destinations`)
-        //   const arrayOutput = inChunks(route.destinations, 20);
-        //   const pricesResultArray = await Promise.all(arrayOutput.map(chunks => req.getPrices(tenant, journeyType, lookaheadWindow, route._id.origin, chunks.map(dest => dest.destination))))
-        //   const priceResultFlatted = pricesResultArray.flatMap(priceArr => priceArr) // flatted sputnik Results
-        //   let fileBuffer1 = ""
-        //   let fileBuffer2 = ""
-        //   route.destinations.forEach((destInfo) => {
-        //     if (!priceResultFlatted.length) {
-        //       fileBuffer1 += `\n${route._id.origin},${destInfo.destination},${destInfo.currency},, No prices available in the next 365 days`
-        //     } else {
-        //       const availableCurrencies = new Array(...new Set(priceResultFlatted.filter(price => price.outboundFlight.arrivalAirportIataCode == destInfo.destination).map(price => price.priceSpecification.currencyCode)))
-        //       const curcAvailable = availableCurrencies.length && req.isCurrencyAvailable(destInfo.currency, availableCurrencies)
-        //       const notes = curcAvailable ? ""
-        //         : (availableCurrencies.length == 0 ? "No prices available in the next 365 days" : "Update to a available currency")
-        //       if (curcAvailable) {
-        //         fileBuffer2 += `\n${route._id.origin},${destInfo.destination},${destInfo.currency},${availableCurrencies.join("/")}, ${notes}`
-        //       } else {
-        //         fileBuffer1 += `\n${route._id.origin},${destInfo.destination},${destInfo.currency},${availableCurrencies.join("/")}, ${notes}`
-        //       }
-
-        //       if (!curcAvailable && availableCurrencies.length) {
-        //         routesToQueryAdgroups.push({ query: { "routeIdentifier.o": route._id.origin, "routeIdentifier.d": destInfo.destination, "routeIdentifier.curC": destInfo.currency, mapped: true }, availableCurrencies })
-        //       }
-        //     }
-        //   }) // flatted empty routes
-        //   await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, fileBuffer1)
-        //   await fHandler.appendToFile(`./reports/${tenant}-${reportForDev}`, fileBuffer2)
-        // }
-        // for naming convention - report campaigns only
-        // if (routesToQueryAdgroups.length < 200) {
-        //   console.log(`${routesToQueryAdgroups.length} queries`)
-        //   if (namingConvention) {
-        //     await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name, Currency Used, Available Currency")
-        //   } else {
-        //     await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, "Account Id, Campaign Id, Campaign Name,Adgroup ID, AdGroup Name, Currency Used, Available Currency")
-        //   }
-        //   const routesChunk = inChunks(routesToQueryAdgroups, 100);
-        //   // const dbQueries = routesChunk.map((adgroups) => {
-        //   for (const routesArray of routesChunk) {
-        //     let fileBuffer3 = ""
-        //     const fullfiledCampaigns = await Promise.all(routesArray.map(data => getAdgAggregation(tenant, namingConvention, data.query)))
-        //     // console.log({ fullfiledCampaigns })
-        //     routesArray.forEach((route, index) => {
-        //       fileBuffer3 += fullfiledCampaigns[index].flatMap(x => x.campaigns).map((dest) => {
-        //         return namingConvention ?
-        //           `\n${dest.accountId},${dest.campaignId},${dest.campaignName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
-        //           : `\n${dest.accountId},${dest.campaignId},${dest.campaignName}, ${dest.adgroupId}, ${dest.adgroupName},${route.query["routeIdentifier.curC"]}, ${route.availableCurrencies.join("/")}`
-        //       }).join("\n")
-        //     })
-        //     await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, fileBuffer3)
-        //   }
-        // } else {
-        //   console.log("Query too big. run separately")
-        // }
       } catch (error) {
         console.log(error);
         continue;
@@ -208,6 +162,11 @@ const handler = async (event, context) => {
     logr.error(error);
   }
 };
+
+const matchingSE = (campaignName, siteEditions) => {
+  return siteEditions.filter((sE) => campaignName.indexOf(sE.gPrefix) !== -1).map(se => `${se.n}: ${se.config.map(c => c.currencyCode).join("-")}`)
+}
+
 try {
   handler()
 
