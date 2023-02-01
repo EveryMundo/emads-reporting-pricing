@@ -7,38 +7,6 @@ const s3Operations = require('./lib/s3Operations')
 const req = require('./lib/external/request')
 const fHandler = require('./lib/fileHandler')
 
-const getAdgAggregation = (tenant, namingConvention, query) => {
-  let pipeline = [{
-    $match: query
-  },
-  {
-    $group: {
-      _id: {
-        "accountId": "$_id.accountId",
-        "campaignId": "$_id.campaignId",
-      },
-      campaigns: {
-        $addToSet: {
-          "accountId": "$_id.accountId",
-          "campaignId": "$_id.campaignId",
-          "campaignName": "$campaignName",
-        }
-      },
-      total: { $sum: 1 }
-    }
-  },
-  {
-    $sort: { total: -1 }
-  }]
-
-  if (!namingConvention) {
-    pipeline[1]['$group']["_id"]["adgroupId"] = "$_id.adgroupId"
-    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupId"] = "$_id.adgroupId"
-    pipeline[1]['$group']["campaigns"]["$addToSet"]["adgroupName"] = "$name"
-
-  }
-  return searchEngineOps.aggregateAdGroupsV1(tenant, pipeline)
-}
 const getDocsAggregation = (tenant) => {
   return searchEngineOps.aggregateFareWireCustomizerItemsV2(tenant, [
     {
@@ -84,7 +52,9 @@ const handler = async (event, context) => {
       stringReport += "\ntenant, Total origins without prices"
       try {
         const { journeyType, lookaheadWindow, namingConvention } = await req.getSettings(tenant)
-        const organizationSettings = await req.getOrganizationSettings(tenant)
+        const organizationSettings = await req.getOrganizationSettings(tenant, 'settings/display-default')
+        const organizationConfig = await req.getOrganizationSettings(tenant, 'settings/configuration')
+        const envConfig = organizationConfig.domains.find(dom => dom.environment == "PRODUCTION")
         const siteEditions = organizationSettings.siteEditionConfigurations.map(({ siteEdition, currencyConfigurations }) => {
           return {
             n: siteEdition.name,
@@ -112,9 +82,8 @@ const handler = async (event, context) => {
         await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, stringReport)
         stringReport = `\nOrigin, Destination, Currency, Available currencies, Report Notes, Recommendation`
         await fHandler.appendToFile(`./reports/${tenant}-${reportForClient}`, stringReport)
-        stringReport = namingConvention ? `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, TRFX site edition (Default config)` : `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, adgroupId, adgroupName`
+        stringReport = namingConvention ? `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, Matching TRFX site edition, Probability of having a price - with other currency` : `\nOrigin, Destination, Currency, Available currencies, campaignId, campaignName, adgroupId, adgroupName,  Probability of having a price`
         await fHandler.appendToFile(`./reports/${tenant}-detailed-${reportForClient}`, stringReport)
-        // console.log(`${routes.length} routes`)
         const routesToQueryAdgroups = []
         for (const origin of Object.keys(aggregatedByOrigin)) {
           console.log(`Origin:${origin} with ${aggregatedByOrigin[origin].destinations.length} destinations`)
@@ -129,17 +98,21 @@ const handler = async (event, context) => {
             const OAndD = aggregatedByOrigin[origin].data.filter(route => route.origin == origin && route.destination == destination)
             if (!priceResultFlatted.length) {
               fileBuffer1 += `\n${origin},${destination},Any currency,, Route not found, Adgroups using this route shouldn't have Ads with prices`
-              fileBuffer3 += OAndD.map((o_d) => `\n${o_d.origin},${o_d.destination},${o_d.currency},, ${Object.values(o_d.targeting).join(",")}`)
+              fileBuffer3 += OAndD.map((o_d) => `\n${o_d.origin},${o_d.destination},${o_d.currency},, ${Object.values(o_d.targeting).join(",")},,Very Low`)
             } else {
 
               const availableCurrencies = new Array(...new Set(priceResultFlatted.filter(price => price.outboundFlight.departureAirportIataCode == origin && price.outboundFlight.arrivalAirportIataCode == destination).map(price => price.priceSpecification.currencyCode)))
               OAndD.forEach((o_d) => {
-                let notes = availableCurrencies.length ? (req.isCurrencyAvailable(o_d.currency, availableCurrencies) ? " Dev needs to review" : "Route was found but with other currencies, The origin/destination/currency may not be valid") : "Route not found, Adgroups using this route shouldn't have Ads with prices "
-                if (req.isCurrencyAvailable(o_d.currency, availableCurrencies)) {
+                const isCurrencyInList = req.isCurrencyAvailable(o_d.currency, availableCurrencies)
+                let notes = availableCurrencies.length ? (isCurrencyInList ? " Dev needs to review" : "Route was found but with other currencies, Use suggested currency on cases where trfx configuration match. See detailed report for details") : "Route not found, Adgroups using this route shouldn't have Ads with prices "
+                if (isCurrencyInList) {
                   fileBuffer2 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${notes}`
                 } else {
+                  const matSE = matchingSE(o_d.targeting.campaignName, siteEditions)
+                  const cListMatchSE = availableCurrencies.filter((acurc) => matSE.find((se) => se.c.indexOf(acurc) !== -1))
+                  const redirectURL = matSE.length > 0 ? (`https://${envConfig.url}/redirect?edition=${matSE[0].n}&orig=${o_d.origin}&dest=${o_d.destination}&tc=cici`) : ""
                   fileBuffer1 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${notes}`
-                  fileBuffer3 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${Object.values(o_d.targeting).join(",")},${namingConvention ? matchingSE(o_d.targeting.campaignName, siteEditions).join(" ") : ""}`
+                  fileBuffer3 = `\n${o_d.origin},${o_d.destination},${o_d.currency}, ${availableCurrencies.join("/")}, ${Object.values(o_d.targeting).join(",")},${namingConvention ? matSE.map(a => `${a.n}:${a.c}`).join(" ") : "This campaign does not match a site edition"}, ${cListMatchSE.length > 0 ? "High" : "Low"}, ${redirectURL}`
                 }
               })
             }
@@ -164,7 +137,7 @@ const handler = async (event, context) => {
 };
 
 const matchingSE = (campaignName, siteEditions) => {
-  return siteEditions.filter((sE) => campaignName.indexOf(sE.gPrefix) !== -1).map(se => `${se.n}: ${se.config.map(c => c.currencyCode).join("-")}`)
+  return siteEditions.filter((sE) => campaignName.indexOf(sE.gPrefix) !== -1).map(se => { return { n: se.n, c: se.config.map(c => c.currencyCode) } })
 }
 
 try {
